@@ -1,0 +1,20 @@
+#!ipxe
+#
+# Embedded into our own custom iPXE build (see docs/ARCHITECTURE.md and
+# scripts/build-ipxe.sh) -- replaces netboot.xyz entirely. netboot.xyz was
+# only ever providing one thing in this project: a way to reach an iPXE
+# prompt. Everything past that point (the boot script, hook, bridge,
+# kernel/initrd, the ISO itself) has been on our own static hosting for a
+# while now, so there's no reason left to depend on netboot.xyz's binary,
+# menu, or asset mirror at all -- this IS our own iPXE, built from the
+# same open-source project netboot.xyz builds on top of, boots straight
+# here with zero menu, zero manual keypresses.
+
+echo Booting Omarchy netboot (no netboot.xyz)...
+dhcp || goto shell
+chain https://lagsoftware.com/files/omarchy-nbd.ipxe || goto shell
+goto shell
+
+:shell
+echo Chain failed, or you asked for the shell -- dropping to iPXE shell.
+shell

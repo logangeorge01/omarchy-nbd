@@ -43,11 +43,12 @@ that changed from the original plan as a result:
 Power on
   │
   ▼
-UEFI/BIOS → iPXE  (netboot.xyz's ipxe.efi/undionly.kpxe, or your own build later)
-  │
+UEFI → our own iPXE (boot/omarchy-autoboot.iso, built by boot/build-ipxe.sh
+  │     from the real open-source ipxe.org project, our own dhcp+chain
+  │     script baked in at build time -- no netboot.xyz involved at all)
   ▼
-chain https://<you>.github.io/omarchy-netboot/boot/omarchy-nbd.ipxe
-  │  (hosted on YOUR GitHub Pages — this repo)
+chain https://lagsoftware.com/files/omarchy-nbd.ipxe
+  │  (real static hosting -- GitHub Pages, this repo's files pushed there)
   ▼
 kernel  <omarchy-vmlinuz-url>                                 ← Omarchy's real kernel, unmodified
 initrd  <omarchy-initrd-url>                                  ← Omarchy's real base initramfs, unmodified
@@ -87,48 +88,83 @@ Omarchy live environment boots normally
 ```
 
 **Nothing about Omarchy's ISO, kernel, initramfs, or squashfs is modified.**
-Nothing about netboot.xyz's own infrastructure is touched either. Everything
-here is net-new files, hosted by us, injected via iPXE's multi-`initrd`
-mechanism — the same trick netboot.xyz already uses to give Omarchy the
-stock `archiso_pxe_http` hook it doesn't ship natively. The one asterisk:
-we do overwrite the *content* of the `archiso_pxe_nfs` hook slot (a name
-that was already going to run regardless), which means this particular
-boot image loses the ability to NFS-netboot — an irrelevant tradeoff here,
-just worth remembering.
+Everything injected is net-new files, hosted by us, added via iPXE's
+multi-`initrd` mechanism — the same trick netboot.xyz's own menu scripts
+use to give Omarchy the stock `archiso_pxe_http` hook it doesn't ship
+natively (that's where this project first learned the trick, back when it
+still depended on netboot.xyz's menu — see "Getting into iPXE" below for
+why that dependency is gone now). The one asterisk: we do overwrite the
+*content* of the `archiso_pxe_nfs` hook slot (a name that was already
+going to run regardless), which means this particular boot image loses
+the ability to NFS-netboot — an irrelevant tradeoff here, just worth
+remembering.
+
+## Getting into iPXE
+
+Early versions of this project reached an iPXE prompt via netboot.xyz's
+own ISO/menu, then manually `chain`ed to `omarchy-nbd.ipxe` from there.
+That was only ever a development convenience — once `omarchy-nbd.ipxe`
+and everything it references moved onto real static hosting, netboot.xyz
+wasn't providing anything except "a way to reach an `iPXE>` prompt."
+
+`boot/build-ipxe.sh` removes that dependency entirely: it builds iPXE
+straight from the real open-source project (`github.com/ipxe/ipxe`, the
+same one netboot.xyz itself builds on) with `boot/autoboot.ipxe` — just
+`dhcp` then `chain` straight to our own hosted boot script — baked in at
+build time via iPXE's `EMBED=` mechanism. The result,
+`boot/omarchy-autoboot.iso` (checked into this repo, ~2MB), boots directly
+to our chain with no menu and no manual keypresses, and no third-party
+infrastructure in the path at all. Attach it as boot media (virtual DVD
+for VM testing; a real USB stick for real hardware) in place of
+netboot.xyz's ISO.
+
+Rebuild it whenever `autoboot.ipxe`'s target URL changes — `EMBED` bakes
+the script into the binary, unlike the rest of this project's iPXE scripts
+(fetched fresh over HTTP at boot), so editing `autoboot.ipxe` alone has no
+effect until `build-ipxe.sh` runs again.
 
 ## Where things get hosted
 
 | Artifact | Size | Where | Why |
 |---|---|---|---|
-| `omarchy-nbd.ipxe` (boot script) | <1KB | **GitHub Pages** (this repo) | Tiny, plain text, exactly what Pages is for |
-| `archiso_pxe_nbd_bridge` (hook script) | <5KB | **GitHub Pages** (this repo) | Same |
-| `omarchy-nbd-bridge` (compiled binary) | est. 2-10MB static | **GitHub Pages** (this repo) | Small enough for a normal git repo, no LFS needed |
-| Omarchy `vmlinuz` / base `initrd` | tens/hundreds of MB | netboot.xyz's `asset-mirror` (unchanged, already proven) | No reason to re-host what already works |
-| Omarchy's whole **ISO** | **~7GB+** | **NOT GitHub Pages, NOT GitHub Releases either** — see below | Needs one Range-capable object, no split |
+| `omarchy-autoboot.iso` (custom iPXE, embedded script) | ~2MB | this repo (`boot/`) | Small enough for a normal git repo; see "Getting into iPXE" above |
+| `omarchy-nbd.ipxe` (boot script) | <1KB | `lagsoftware.com/files` (GitHub Pages) | Tiny, plain text, exactly what Pages is for |
+| `archiso_pxe_nfs` (hook script) | <5KB | `lagsoftware.com/files` (GitHub Pages) | Same |
+| `omarchy-nbd-bridge` (compiled binary) | ~6MB static | `lagsoftware.com/files` (GitHub Pages) | Small enough for a normal git repo, no LFS needed |
+| Omarchy `vmlinuz` / base `initrd` | ~270MB combined | a GitHub Release (this repo) | `initrd` alone is over GitHub's 100MB per-file *push* limit — Release assets aren't subject to that cap (2GB/asset), and are served with real Range support (confirmed: backed by Azure Blob under the hood despite the `github.com` URL) |
+| Omarchy's whole **ISO** | **~6GB+** | `iso.omarchy.org` — **Omarchy's own official host, untouched** | Confirmed real `Range`/206 support; no reason to re-host a file this size ourselves when the upstream project already serves it correctly |
 
-The whole ISO (bigger than just the squashfs — see the correction above,
-we need the whole thing now, not just `airootfs.sfs`) needs a different
-home than the rest of this project. GitHub Releases specifically is a worse
-fit here than it was for testing the squashfs alone: that only worked
-because netboot.xyz's `asset-mirror` already did the annoying part (split
-into 4 parts under GitHub's 2GB/asset cap, which our bridge would then have
-to know how to stitch back together — solvable, but pointless complexity
-when there's a simpler option). **Azure Blob Storage (a single block blob)
-is the right home for this one** — no 2GB split, one URL, `Range` requests
-work natively. This is purely a hosting choice; the bridge just needs a URL
-that supports `Range`, it doesn't care what's serving it.
+Notably, **nothing here runs on a server we maintain.** Every piece is
+either committed to this repo, sitting on GitHub Pages/Releases, or
+Omarchy's own official download host. The only thing that has to exist
+per-boot is the bridge process itself, and that's launched by our injected
+hook inside the target machine's own initramfs — not hosted anywhere.
+
+`vmlinuz`/`initrd` must always be extracted from the *exact same* Omarchy
+release the `iso_url` in `omarchy-nbd.ipxe` points at — confirmed the hard
+way that a version mismatch (a different kernel build than what the
+squashfs's own `/usr/lib/modules/` was built for) boots into a live shell
+fine but breaks partway through a real install (`dm_mod`/other modules for
+the running kernel simply don't exist in the squashfs). Re-extract and
+re-upload both whenever `iso_url`'s version changes.
 
 ## Repo layout
 
 ```
 omarchy-netboot/
   boot/
-    omarchy-nbd.ipxe          ← the chainloaded boot script
+    omarchy-nbd.ipxe          ← the chainloaded boot script (real: lagsoftware.com/files)
+    autoboot.ipxe             ← embedded into our own iPXE build, see build-ipxe.sh
+    build-ipxe.sh             ← builds omarchy-autoboot.iso from real upstream iPXE source
+    omarchy-autoboot.iso      ← built output: our own iPXE, no netboot.xyz
   hook/
-    archiso_pxe_nbd_bridge    ← archiso initcpio hook (shell)
+    archiso_pxe_nfs           ← archiso initcpio hook (shell), repurposed slot
   bridge/
-    DESIGN.md                 ← detailed spec for the binary (see this first)
-    (your source lives here)
+    DESIGN.md                 ← the bridge's spec: protocol, milestones, interface contract
+    OPTIMIZATION.md           ← next round of work: concurrent fetch + readahead
+    cmd/omarchy-nbd-bridge/    ← CLI entrypoint
+    internal/                 ← nbdproto, httpbackend, cache, backend packages
+    scripts/, integration/    ← build/test/stress-test scripts
   docs/
     ARCHITECTURE.md           ← this file
 ```
