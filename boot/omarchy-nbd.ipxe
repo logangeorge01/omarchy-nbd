@@ -1,0 +1,60 @@
+#!ipxe
+#
+# Netboots Omarchy via the NBD bridge instead of archiso's stock
+# archiso_pxe_http hook -- avoids the forced full-squashfs-to-RAM copy
+# that hook always does. See ../docs/ARCHITECTURE.md for the full picture.
+#
+# iso_url points straight at Omarchy's own official host -- confirmed it
+# serves the whole, unmodified ISO with proper Range support (Accept-Ranges,
+# real 206/Content-Range replies), so there's no reason to re-host that
+# ~6GB file ourselves. repo_base is real static hosting too (GitHub Pages,
+# lagsoftware.com/files), and base (kernel/initrd) is now a GitHub Release
+# -- see below. Nothing here depends on any machine of ours staying on.
+#
+# Whichever ISO version iso_url points at, base's vmlinuz/initrd MUST be
+# extracted from that *exact same* build. Confirmed the hard way: a
+# different build's kernel (module dir 6.19.13-arch1-1, generic) paired
+# against this ISO's squashfs (7.1.8-arch1-...-t2, the T2 Mac kernel) boots
+# fine up through a live shell, but fails partway through a real install
+# (dm_mod/other modules for the running kernel don't exist in the squashfs
+# at all). Re-extract and re-host base whenever iso_url's version changes.
+#
+# base's vmlinuz/initrd (~250MB combined -- over GitHub's 100MB hard
+# per-file *push* limit, so these couldn't just join repo_base on lagsite
+# the way the small files did) live as GitHub Release assets instead --
+# confirmed Range support the same way as iso_url (real 206/Content-Range,
+# backed by Azure Blob under the hood despite the github.com URL).
+#
+# Only two things get injected into the base initramfs, both from this
+# repo:
+#   - hook/archiso_pxe_nfs        (repurposed slot, starts the bridge)
+#   - bridge/omarchy-nbd-bridge   (the compiled binary)
+#
+# archiso_nbd_srv=127.0.0.1 + archiso_nbd_name=archiso: archiso's STOCK,
+# UNMODIFIED archiso_pxe_nbd hook (already present in Omarchy's initramfs,
+# no injection needed for it) connects to our locally-running bridge as if
+# it were any other NBD server. copytoram=n tells it not to copy anything
+# to RAM -- confirmed against the actual archiso_pxe_nbd source that this
+# is respected, not overridden the way the HTTP hook forces it.
+
+set base https://github.com/logangeorge01/lagsite/releases/download/omarchy-4.0.0-boot/
+set repo_base https://lagsoftware.com/files
+set iso_url https://iso.omarchy.org/omarchy-4.0.0.iso
+
+set ipparam BOOTIF=${netX/mac} ip=dhcp net.ifnames=0
+
+# Clear any images already loaded in this iPXE session (from browsing the
+# menu, or an earlier attempt) before loading ours -- netboot.xyz's own
+# live-omarchy.ipxe does this for exactly this reason. Skipping it let
+# leftover images get concatenated in alongside ours, corrupting the
+# combined initrd blob: confirmed as the actual cause of the "VFS: Unable
+# to mount root fs" panics -- it happened identically with netboot.xyz's
+# own kernel+initrd (already proven working earlier in this project) once
+# reached via a chain that skipped imgfree, not just with the T2 kernel.
+imgfree
+
+kernel ${base}vmlinuz ${ipparam} archisobasedir=arch archiso_nbd_srv=127.0.0.1 archiso_nbd_name=archiso copytoram=n archiso_nbd_bridge_url=${iso_url} module_blacklist=nvidia,nvidia_modeset,nvidia_uvm,nvidia_drm,pcspkr nouveau.modeset=1 i915.modeset=1 radeon.modeset=1 initrd=initrd.magic console=tty1 plymouth.enable=0 drm.panic_screen=kmsg systemd.log_level=debug ignore_loglevel
+initrd ${base}initrd
+initrd ${repo_base}/archiso_pxe_nfs /hooks/archiso_pxe_nfs mode=755
+initrd ${repo_base}/omarchy-nbd-bridge /usr/local/bin/omarchy-nbd-bridge mode=755
+boot

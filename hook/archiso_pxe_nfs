@@ -1,0 +1,85 @@
+#!/usr/bin/ash
+#
+# This file DELIBERATELY replaces Omarchy's stock archiso_pxe_nfs hook.
+#
+# Why this slot: Omarchy's initramfs /config has a fixed HOOKS list
+# ("udev memdisk archiso archiso_loop_mnt archiso_pxe_common archiso_pxe_nbd
+# archiso_pxe_http archiso_pxe_nfs plymouth") baked in at build time — a
+# hook file only runs if its name is already in that list. We have no use
+# for NFS netboot, so we reuse its already-wired-in slot instead of needing
+# to patch /config to add a new hook name. Tradeoff: this image can no
+# longer NFS-netboot. Fine for this project, worth remembering if you ever
+# wonder why.
+#
+# Job: start the NBD<->HTTP bridge in the background, and don't return
+# until it's actually accepting connections — archiso_pxe_nbd's own
+# mount_handler (stock, untouched) only polls for /dev/nbd0 to exist as a
+# device node, not for a live server on the other end, so without this
+# wait there's a real race between nbd-client's first connect attempt and
+# the bridge finishing startup.
+#
+# No-ops completely if archiso_nbd_bridge_url isn't set on the kernel
+# cmdline — same "quiet if not configured" convention every other archiso
+# pxe hook follows.
+
+run_hook() {
+    bridge_url="$(getarg 'archiso_nbd_bridge_url')"
+    bridge_listen="$(getarg 'archiso_nbd_bridge_listen' '127.0.0.1:10809')"
+    bridge_cache_size="$(getarg 'archiso_nbd_bridge_cache_size' '256M')"
+
+    if [ -z "${bridge_url}" ]; then
+        return 0
+    fi
+
+    # This initramfs never brings up loopback on its own -- nothing needs
+    # it until systemd starts post-switch_root. Confirmed against a real
+    # boot: without this, the bridge's own bind() to 127.0.0.1 fails with
+    # "cannot assign requested address" (EADDRNOTAVAIL) since `lo` is down.
+    ip link set lo up 2>/dev/null || ifconfig lo up 2>/dev/null
+
+    msg ":: Starting omarchy-nbd-bridge for ${bridge_url}"
+
+    # Plain '&' is enough here, deliberately not setsid: this hook runs
+    # inside /init, which IS pid 1 for the whole initramfs phase (no
+    # switch_root yet) -- a backgrounded child of pid 1 has nothing to get
+    # detached from. (setsid mattered when manually testing the equivalent
+    # nbdkit invocation over separate `wsl.exe` invocations earlier in this
+    # project -- each one WAS its own short-lived session that could reap
+    # unshielded children. Different situation here; also, confirmed against
+    # the real archiso initramfs: setsid isn't even present in this busybox
+    # environment, so this used to fail outright with "setsid: not found"
+    # and the bridge never started at all.)
+    ready_file=/tmp/omarchy-nbd-bridge.ready
+    rm -f "${ready_file}"
+
+    /usr/local/bin/omarchy-nbd-bridge \
+        --url "${bridge_url}" \
+        --listen "${bridge_listen}" \
+        --cache-size "${bridge_cache_size}" \
+        --ready-file "${ready_file}" \
+        >/tmp/omarchy-nbd-bridge.log 2>&1 </dev/null &
+
+    # Poll for the ready-file rather than probing the port with nc -- this
+    # environment's busybox nc turned out not to support -z at all (silent,
+    # unconditional false-negative every time -- both a 10s and a 30s
+    # budget hit the ceiling regardless of the bridge's actual state, and
+    # a manual nbd-client right after either "failure" connected instantly),
+    # and `[ -e ]` has no equivalent flag-availability risk to get wrong.
+    i=0
+    while [ ! -e "${ready_file}" ]; do
+        i=$((i + 1))
+        if [ "${i}" -ge 30 ]; then
+            echo "ERROR: omarchy-nbd-bridge did not come up after 30 seconds"
+            echo "   see /tmp/omarchy-nbd-bridge.log"
+            echo "   Falling back to interactive prompt"
+            echo "   You can try to fix the problem manually, log out when you are finished"
+            launch_interactive_shell
+            break
+        fi
+        sleep 1
+    done
+
+    msg ":: omarchy-nbd-bridge is ready on ${bridge_listen}"
+}
+
+# vim: set ft=sh:
