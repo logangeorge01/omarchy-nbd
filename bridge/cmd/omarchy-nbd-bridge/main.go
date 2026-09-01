@@ -26,12 +26,15 @@ import (
 )
 
 // blockSize is the cache's fetch/eviction granularity. See DESIGN.md
-// "Block size / cache granularity" -- 64KB balances squashfs's small
-// dense metadata reads (want small blocks, so a metadata read doesn't
-// drag in megabytes of unrelated data) against HTTP Range request
-// overhead (want blocks big enough that sequential reads don't turn into
-// a flood of tiny requests).
-const blockSize = 64 * 1024
+// "Block size / cache granularity" for the original tradeoff (small
+// blocks for squashfs's dense metadata reads vs. big enough to avoid a
+// flood of tiny requests) and OPTIMIZATION.md for why this moved off
+// that original 64KB: at the ~150ms per-request latency measured against
+// the real ISO host, 64KB blocks need dozens of concurrent requests to
+// approach the host's real bandwidth ceiling. 256KB cuts the number of
+// round trips per byte by 4x for a modest, not "megabytes", increase in
+// what one metadata-adjacent read drags in.
+const blockSize = 256 * 1024
 
 func main() {
 	url := flag.String("url", "", "URL to serve (required) -- must support HTTP Range requests")
