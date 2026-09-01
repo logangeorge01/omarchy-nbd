@@ -56,6 +56,47 @@ still under the ~43MB/s host ceiling but closer to it; combined with the
 concurrent-fetch + readahead work this is a **5.5x** improvement over
 the original 41-minute baseline.
 
+## Result, after dynamic cache sizing + readahead-depth scaling
+
+**7.5 minutes → 7 minutes** (dynamic cache sizing off `MemAvailable`,
+see `hook/archiso_pxe_nfs`) **→ 6.5 minutes** (readahead depth scaling
+with cache capacity, `cache.go`'s `prefetch`/`prefetchCeiling`/
+`prefetchScaleDivisor` — 5% of capacity, floored at the old fixed 5
+blocks, capped at 64). Same VM, same 4GB cap, same ~6GB ISO throughout.
+
+## Diminishing returns on the fetch-side levers
+
+Worth calling out explicitly, since it changes where further effort is
+best spent:
+
+| change | time saved |
+|---|---|
+| concurrency + readahead (Priority 1+2) | 41→12 min (29 min) |
+| block size 64KB→256KB | 12→7.5 min (4.5 min) |
+| dynamic cache sizing | 7.5→7 min (0.5 min) |
+| readahead depth scaling (5→64 blocks) | 7→6.5 min (0.5 min) |
+
+The last row is the telling one: readahead depth went up **12.8x** (5
+blocks / 1.25MB ahead → 64 blocks / 16MB ahead) on this VM, and it only
+bought ~7%. If fetch concurrency/depth were still the bottleneck, that
+big a jump should have moved the needle far more than that. A Little's
+Law sanity check agrees: at 256KB blocks with 64x concurrency the
+theoretical ceiling is roughly `64 × 256KB / 150ms ≈ 109MB/s`, already
+well above the ~43MB/s host ceiling measured earlier in this doc — so
+on a machine actually hitting the 64-block cap, the fetch pipeline
+should already be host-bandwidth-bound, not latency/concurrency-bound.
+
+Conclusion: further tuning of block size, concurrency, or readahead
+depth is very unlikely to buy much more — the remaining wall-clock time
+is most likely dominated by things outside this bridge's control
+entirely (disk writes, squashfs decompression, package extraction,
+pacman overhead — see "What the workload actually looks like" below).
+Confirming that would take instrumenting cumulative time spent inside
+`cache.go`'s backend fetches vs. total wall-clock, to see fetch-wait as
+a share of the total — not done yet, and not worth doing speculatively
+if 6.5 minutes for a ~6GB image on a 4GB-capped machine is already an
+acceptable place to land.
+
 ## What the workload actually looks like
 
 Worth being precise about this, since it changes which optimization matters
