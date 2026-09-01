@@ -46,6 +46,10 @@ type Cache struct {
 	c    map[int64]*node
 	head *node // most recently used
 	tail *node // least recently used
+
+	smu      sync.Mutex
+	inflight map[int64]*inflightr
+	infmu    sync.Mutex
 }
 
 type node struct {
@@ -54,6 +58,12 @@ type node struct {
 	parent *node // toward head (more recently used)
 	child  *node // toward tail (less recently used)
 }
+
+type inflightr struct {
+	done chan struct{}
+}
+
+const PREFETCH = 5
 
 // New wraps b with an LRU cache. blockSize is the alignment/granularity
 // for both fetches and eviction; maxBytes is the hard cap on total
@@ -65,6 +75,7 @@ func New(b backend.Backend, blockSize int, maxBytes int64) *Cache {
 		maxBytes:    maxBytes,
 		backendSize: b.Size(),
 		c:           map[int64]*node{},
+		inflight:    map[int64]*inflightr{},
 	}
 }
 
@@ -86,14 +97,19 @@ func (c *Cache) Size() int64 {
 // currently holding. Not part of backend.Backend -- exposed for tests and
 // for whatever metrics/logging you want in the real binary.
 func (c *Cache) ResidentBytes() int64 {
+	// fmt.Println("locking mu 101")
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// fmt.Println("unlocking 104")
 	return int64(len(c.c)) * c.blockSize
 }
 
 // touchLocked moves n to the front (head/MRU end) of the list. Caller
 // must hold c.mu.
 func (c *Cache) touchLocked(n *node) {
+	// fmt.Println("locking mu 110")
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.head == n {
 		return
 	}
@@ -120,6 +136,9 @@ func (c *Cache) touchLocked(n *node) {
 // evictOneLocked drops the least-recently-used block. Caller must hold
 // c.mu.
 func (c *Cache) evictOneLocked() {
+	// fmt.Println("locking mu 139")
+	// c.mu.Lock()
+	// defer c.mu.Unlock()
 	victim := c.tail
 	if victim == nil {
 		return
@@ -136,15 +155,59 @@ func (c *Cache) evictOneLocked() {
 // getOrFetchLocked returns the node for block i, fetching it from the
 // wrapped backend (evicting first if needed to stay under maxBytes) if
 // it isn't already resident. Caller must hold c.mu.
-func (c *Cache) getOrFetchLocked(i int64) (*node, error) {
+func (c *Cache) getOrFetchLocked(i int64, term bool) (*node, error) {
+	// fmt.Println("locking smu 159")
+	c.smu.Lock()
+	// fmt.Println("locking mu 161")
+	c.mu.Lock()
+
 	if n, ok := c.c[i]; ok {
+		c.mu.Unlock()
 		c.touchLocked(n)
+		c.smu.Unlock()
+		return n, nil
+	}
+	c.mu.Unlock()
+
+	if !term {
+		for ii := i + 1; ii <= i+PREFETCH; ii++ {
+			if (ii+1)*c.blockSize <= c.backendSize {
+				go func() {
+					c.getOrFetchLocked(ii, true)
+				}()
+			}
+		}
+	}
+
+	// fmt.Println("locking infmu 182")
+	c.infmu.Lock()
+	if call, ok := c.inflight[i]; ok {
+		c.infmu.Unlock()
+		c.smu.Unlock()
+
+		// Someone else is fetching it.
+		<-call.done
+
+		// Fetch is complete, so just read cache.
+		// fmt.Println("locking mu 192")
+		c.mu.Lock()
+		n, _ := c.c[i]
+		c.mu.Unlock()
 		return n, nil
 	}
 
-	for len(c.c) > 0 && int64(len(c.c))*c.blockSize+c.blockSize > c.maxBytes {
+	call := &inflightr{done: make(chan struct{})}
+	c.inflight[i] = call
+	// c.infmu.Unlock()
+	c.smu.Unlock()
+
+	c.mu.Lock()
+	for len(c.c) > 0 && int64(len(c.c)+len(c.inflight))*c.blockSize+c.blockSize > c.maxBytes {
+		// c.mu.Unlock()
 		c.evictOneLocked()
 	}
+	c.mu.Unlock()
+	c.infmu.Unlock()
 
 	// The last block of a backend whose size isn't an exact multiple of
 	// blockSize is shorter than blockSize -- fetching a full blockSize
@@ -168,6 +231,10 @@ func (c *Cache) getOrFetchLocked(i int64) (*node, error) {
 		return nil, err
 	}
 
+	// fmt.Println("locking infmu 233")
+	c.infmu.Lock()
+	c.mu.Lock()
+	delete(c.inflight, i)
 	n := &node{b: data, off: i}
 	c.c[i] = n
 	n.child = c.head
@@ -178,17 +245,37 @@ func (c *Cache) getOrFetchLocked(i int64) (*node, error) {
 	if c.tail == nil {
 		c.tail = n
 	}
+	c.mu.Unlock()
+	c.infmu.Unlock()
+	close(call.done)
+
 	return n, nil
 }
 
-func (c *Cache) ReadAt(p []byte, off int64) (int, error) {
+func (c *Cache) InsertNode(n *node, i int64) {
+	// fmt.Println("locking mu 243")
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.c[i] = n
+	n.child = c.head
+	if c.head != nil {
+		c.head.parent = n
+	}
+	c.head = n
+	if c.tail == nil {
+		c.tail = n
+	}
+}
+
+func (c *Cache) ReadAt(p []byte, off int64) (int, error) {
+	// c.mu.Lock()
+	// defer c.mu.Unlock()
+	// c.smu.Lock()
 
 	end := off + int64(len(p))
 	written := int64(0)
 	for i := off / c.blockSize; i <= (end-1)/c.blockSize; i++ {
-		n, err := c.getOrFetchLocked(i)
+		n, err := c.getOrFetchLocked(i, false)
 		if err != nil {
 			return int(written), err
 		}

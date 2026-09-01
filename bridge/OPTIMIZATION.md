@@ -28,6 +28,25 @@ NBD request to completion before starting the next. At ~150ms average per
 adapter isn't part of this path's cost at all — the host-side measurement
 above already showed the pipe itself is fine).
 
+## Result, after implementing Priority 1 + 2
+
+**41 minutes → 12 minutes** (real install, same VM, same 4GB cap, same
+~6GB ISO) after concurrent fetch + readahead prefetch landed, plus fixing
+an eviction-accounting race the concurrent fetching exposed (a completed
+block was briefly counted in both `c.c` and `c.inflight` at once, or in
+neither, depending on operation order — inflated or deflated the eviction
+budget check; fixed by making the inflight-deregister and the cache-insert
+one atomic step instead of two).
+
+That's ~8.3MB/s average across the whole install, against the ~43MB/s
+ceiling measured from the host — real headroom still on the table, likely
+worth more than the 3.4x already gained. The whole install isn't pure
+network time (disk writes, decompression, package extraction all cost
+something too), so it won't hit 43MB/s outright, but 8.3 vs 43 says the
+network path specifically is still far from saturated. Block size (the
+Little's Law table above) is the untried lever at this point — concurrency
+and readahead are both landed.
+
 ## What the workload actually looks like
 
 Worth being precise about this, since it changes which optimization matters
