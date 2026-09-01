@@ -25,10 +25,33 @@
 run_hook() {
     bridge_url="$(getarg 'archiso_nbd_bridge_url')"
     bridge_listen="$(getarg 'archiso_nbd_bridge_listen' '127.0.0.1:10809')"
-    bridge_cache_size="$(getarg 'archiso_nbd_bridge_cache_size' '256M')"
+    bridge_cache_size="$(getarg 'archiso_nbd_bridge_cache_size')"
 
     if [ -z "${bridge_url}" ]; then
         return 0
+    fi
+
+    # No explicit archiso_nbd_bridge_cache_size on the cmdline: size the
+    # cache off actual available memory instead of a fixed guess -- the
+    # same /proc/meminfo MemAvailable field Omarchy's own installer uses
+    # for its own memory-budget decision (warm_offline_mirror() in
+    # .automated_script.sh), confirmed present and correctly formatted in
+    # this exact live environment. 25% of MemAvailable, clamped to a 64M
+    # floor (below which a cache isn't doing much) and a 2G ceiling (well
+    # past the point of diminishing returns for a squashfs this size) --
+    # leaves the rest for the kernel, the running install, and archiso's
+    # own COW overlay tmpfs, all of which also live in RAM. Falls back to
+    # the old fixed 256M only if /proc/meminfo can't be read at all.
+    if [ -z "${bridge_cache_size}" ]; then
+        mem_avail_kb="$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo 2>/dev/null)"
+        if [ -n "${mem_avail_kb}" ] && [ "${mem_avail_kb}" -gt 0 ] 2>/dev/null; then
+            cache_kb=$((mem_avail_kb / 4))
+            [ "${cache_kb}" -lt 65536 ] && cache_kb=65536
+            [ "${cache_kb}" -gt 2097152 ] && cache_kb=2097152
+            bridge_cache_size="${cache_kb}K"
+        else
+            bridge_cache_size="256M"
+        fi
     fi
 
     # This initramfs never brings up loopback on its own -- nothing needs
