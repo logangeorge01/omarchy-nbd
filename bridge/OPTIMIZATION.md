@@ -47,6 +47,15 @@ network path specifically is still far from saturated. Block size (the
 Little's Law table above) is the untried lever at this point — concurrency
 and readahead are both landed.
 
+## Result, after bumping block size 64KB -> 256KB
+
+**12 minutes → 7.5 minutes** (real install, same VM, same 4GB cap, same
+~6GB ISO), just from the block size change in `main.go` — no other code
+touched this round. ~13.7MB/s average across the whole install now,
+still under the ~43MB/s host ceiling but closer to it; combined with the
+concurrent-fetch + readahead work this is a **5.5x** improvement over
+the original 41-minute baseline.
+
 ## What the workload actually looks like
 
 Worth being precise about this, since it changes which optimization matters
