@@ -41,6 +41,7 @@ type Cache struct {
 	blockSize   int64
 	maxBytes    int64
 	backendSize int64
+	prefetch    int64
 
 	mu   sync.Mutex
 	c    map[int64]*node
@@ -63,17 +64,48 @@ type inflightr struct {
 	done chan struct{}
 }
 
+// PREFETCH is the floor on readahead depth (blocks fetched ahead of a
+// miss, without being asked) -- also what every existing test's small
+// cache sizes (8-20 blocks of capacity, well under prefetchScaleDivisor)
+// resolves to via the scaling formula below, so none of them needed to
+// change when this became dynamic.
 const PREFETCH = 5
+
+// prefetchCeiling bounds how far ahead a single miss will fetch on a
+// large cache. Sized against the Little's Law table in OPTIMIZATION.md:
+// ~25 concurrent 256KB fetches is enough to saturate the ~43MB/s host
+// ceiling measured there, so this leaves real margin above that without
+// firing hundreds of simultaneous requests at a single origin on a
+// multi-GB cache (real rate-limiting risk, not just a theoretical one --
+// see OPTIMIZATION.md's own concurrency-cap discussion).
+const prefetchCeiling = 64
+
+// prefetchScaleDivisor: readahead depth is capacityBlocks/prefetchScaleDivisor,
+// i.e. ~5% of how many blocks the cache can hold resident at once. A
+// bigger cache can absorb a deeper readahead burst without evicting its
+// own prefetch before it's consumed, so this scales with the dynamic
+// cache-size sizing in hook/archiso_pxe_nfs instead of leaving a 4GB
+// machine's much larger cache budget doing nothing for readahead depth.
+const prefetchScaleDivisor = 20
 
 // New wraps b with an LRU cache. blockSize is the alignment/granularity
 // for both fetches and eviction; maxBytes is the hard cap on total
 // resident cache size.
 func New(b backend.Backend, blockSize int, maxBytes int64) *Cache {
+	capacityBlocks := maxBytes / int64(blockSize)
+	prefetch := capacityBlocks / prefetchScaleDivisor
+	if prefetch < PREFETCH {
+		prefetch = PREFETCH
+	}
+	if prefetch > prefetchCeiling {
+		prefetch = prefetchCeiling
+	}
 	return &Cache{
 		back:        b,
 		blockSize:   int64(blockSize),
 		maxBytes:    maxBytes,
 		backendSize: b.Size(),
+		prefetch:    prefetch,
 		c:           map[int64]*node{},
 		inflight:    map[int64]*inflightr{},
 	}
@@ -170,7 +202,7 @@ func (c *Cache) getOrFetchLocked(i int64, term bool) (*node, error) {
 	c.mu.Unlock()
 
 	if !term {
-		for ii := i + 1; ii <= i+PREFETCH; ii++ {
+		for ii := i + 1; ii <= i+c.prefetch; ii++ {
 			if (ii+1)*c.blockSize <= c.backendSize {
 				go func() {
 					c.getOrFetchLocked(ii, true)

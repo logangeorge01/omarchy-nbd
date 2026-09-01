@@ -63,9 +63,21 @@ func main() {
 	// through a long session -- every read from that point on failed
 	// identically ("dial tcp: lookup ... connection refused"), no amount
 	// of retrying helped, because retrying still re-resolved every time.
+	// MaxIdleConnsPerHost set explicitly, not left at the default of 2:
+	// readahead depth now scales with cache size (see cache.go's
+	// prefetchCeiling, up to 64 concurrent fetches on a large cache) --
+	// with the default, most of those connections would get closed and
+	// re-opened rather than reused once concurrency exceeds 2, adding a
+	// fresh TCP+TLS handshake to nearly every fetch and quietly eating
+	// the readahead win this is meant to buy. Matches prefetchCeiling
+	// since that's the real ceiling on how many connections to this one
+	// host are ever in flight at once.
 	client := &http.Client{
-		Timeout:   30 * time.Second,
-		Transport: &http.Transport{DialContext: (&pinnedDialer{}).DialContext},
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			DialContext:         (&pinnedDialer{}).DialContext,
+			MaxIdleConnsPerHost: 64,
+		},
 	}
 
 	hb, err := httpbackend.New(*url, client)
